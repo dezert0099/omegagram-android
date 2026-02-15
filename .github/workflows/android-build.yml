@@ -47,15 +47,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          set +e
-          yes | sdkmanager --licenses > /dev/null
-          license_status=$?
-          set -e
-          if [ "$license_status" -ne 0 ] && [ "$license_status" -ne 141 ]; then
-            echo "sdkmanager --licenses failed with exit code: $license_status"
-            exit "$license_status"
-          fi
-          sdkmanager \
+          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+
+          # Some runners return non-zero for `--licenses` even when it works.
+          # Real install errors are still caught by the install command below.
+          yes | sdkmanager --sdk_root="$SDK_ROOT" --licenses > /dev/null 2>&1 || true
+
+          sdkmanager --sdk_root="$SDK_ROOT" \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0" \
