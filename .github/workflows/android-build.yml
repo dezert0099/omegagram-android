@@ -1,0 +1,171 @@
+name: Android Cloud Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "What to build"
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - regular
+          - huawei
+          - standalone
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@v3
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "build-tools;30.0.3" \
+            "cmake;3.10.2.4988404" \
+            "ndk;21.4.7075529"
+
+      - name: Apply dx compatibility fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          DX_30="$SDK_ROOT/build-tools/30.0.3/dx"
+          DX_JAR_30="$SDK_ROOT/build-tools/30.0.3/lib/dx.jar"
+          DX_35="$SDK_ROOT/build-tools/35.0.0/dx"
+          DX_JAR_35="$SDK_ROOT/build-tools/35.0.0/lib/dx.jar"
+
+          if [ -f "$DX_30" ] && [ -f "$DX_JAR_30" ]; then
+            cp "$DX_30" "$DX_35"
+            cp "$DX_JAR_30" "$DX_JAR_35"
+            chmod +x "$DX_35"
+          fi
+
+      - name: Inject optional secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            printf "%s" "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > TMessagesProj/config/release.keystore
+          fi
+
+          mkdir -p ~/.gradle
+          touch ~/.gradle/gradle.properties
+          if [ -n "${{ secrets.RELEASE_KEY_PASSWORD }}" ]; then
+            echo "RELEASE_KEY_PASSWORD=${{ secrets.RELEASE_KEY_PASSWORD }}" >> ~/.gradle/gradle.properties
+          fi
+          if [ -n "${{ secrets.RELEASE_STORE_PASSWORD }}" ]; then
+            echo "RELEASE_STORE_PASSWORD=${{ secrets.RELEASE_STORE_PASSWORD }}" >> ~/.gradle/gradle.properties
+          fi
+          if [ -n "${{ secrets.RELEASE_KEY_ALIAS }}" ]; then
+            echo "RELEASE_KEY_ALIAS=${{ secrets.RELEASE_KEY_ALIAS }}" >> ~/.gradle/gradle.properties
+          fi
+
+          if [ -n "${{ secrets.LOCAL_PROPERTIES_BASE64 }}" ]; then
+            printf "%s" "${{ secrets.LOCAL_PROPERTIES_BASE64 }}" | base64 --decode > local.properties
+          fi
+
+          if [ -n "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" ]; then
+            printf "%s" "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" | base64 --decode > TMessagesProj/google-services.json
+            printf "%s" "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" | base64 --decode > TMessagesProj_App/google-services.json
+            printf "%s" "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" | base64 --decode > TMessagesProj_AppStandalone/google-services.json
+            printf "%s" "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" | base64 --decode > TMessagesProj_AppHockeyApp/google-services.json
+          fi
+
+          if [ -n "${{ secrets.HUAWEI_GOOGLE_SERVICES_JSON_BASE64 }}" ]; then
+            printf "%s" "${{ secrets.HUAWEI_GOOGLE_SERVICES_JSON_BASE64 }}" | base64 --decode > TMessagesProj_AppHuawei/google-services.json
+          fi
+
+          if [ -n "${{ secrets.AGCONNECT_SERVICES_JSON_BASE64 }}" ]; then
+            printf "%s" "${{ secrets.AGCONNECT_SERVICES_JSON_BASE64 }}" | base64 --decode > TMessagesProj_AppHuawei/agconnect-services.json
+          fi
+
+      - name: Select Gradle tasks
+        id: tasks
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ inputs.target }}" in
+            all)
+              TASKS=":TMessagesProj_App:bundleBundleAfat_SDK23Release :TMessagesProj_App:bundleBundleAfatRelease :TMessagesProj_App:assembleAfatRelease :TMessagesProj_AppHuawei:assembleAfatRelease :TMessagesProj_AppStandalone:assembleAfatStandalone"
+              ;;
+            regular)
+              TASKS=":TMessagesProj_App:bundleBundleAfat_SDK23Release :TMessagesProj_App:bundleBundleAfatRelease :TMessagesProj_App:assembleAfatRelease"
+              ;;
+            huawei)
+              TASKS=":TMessagesProj_AppHuawei:assembleAfatRelease"
+              ;;
+            standalone)
+              TASKS=":TMessagesProj_AppStandalone:assembleAfatStandalone"
+              ;;
+            *)
+              echo "Unknown target: ${{ inputs.target }}"
+              exit 1
+              ;;
+          esac
+          echo "tasks=$TASKS" >> "$GITHUB_OUTPUT"
+          echo "Tasks: $TASKS"
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace --max-workers=2 ${{ steps.tasks.outputs.tasks }}
+
+      - name: List artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          find TMessagesProj_App/build/outputs -type f 2>/dev/null | sort || true
+          find TMessagesProj_AppHuawei/build/outputs -type f 2>/dev/null | sort || true
+          find TMessagesProj_AppStandalone/build/outputs -type f 2>/dev/null | sort || true
+          find TMessagesProj/build/outputs -type f 2>/dev/null | sort || true
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-android-${{ inputs.target }}-${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            TMessagesProj_App/build/outputs/**/*.apk
+            TMessagesProj_App/build/outputs/**/*.aab
+            TMessagesProj_AppHuawei/build/outputs/**/*.apk
+            TMessagesProj_AppStandalone/build/outputs/**/*.apk
+            TMessagesProj_App/build/outputs/**/mapping.txt
+            TMessagesProj_AppHuawei/build/outputs/**/mapping.txt
+            TMessagesProj_AppStandalone/build/outputs/**/mapping.txt
+            TMessagesProj/build/outputs/native-debug-symbols/**/*.zip
