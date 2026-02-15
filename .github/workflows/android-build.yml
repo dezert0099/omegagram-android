@@ -47,7 +47,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          set +e
           yes | sdkmanager --licenses > /dev/null
+          license_status=$?
+          set -e
+          if [ "$license_status" -ne 0 ] && [ "$license_status" -ne 141 ]; then
+            echo "sdkmanager --licenses failed with exit code: $license_status"
+            exit "$license_status"
+          fi
           sdkmanager \
             "platform-tools" \
             "platforms;android-35" \
